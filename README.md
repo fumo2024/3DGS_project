@@ -26,10 +26,33 @@ pip install -e .
 cd submodules/simple-knn
 pip install -e .
 ```
+
+Some users may encounter significant issues during dependency installation, primarily due to the use of an older CUDA version. Possible solutions include installing the corresponding CUDA version or using a clean virtual machine. For Windows users, you may refer to
+[this video](https://www.youtube.com/watch?v=UXtuigy_wYc) for guidance.
+
+As for me, I used a pre-configured 3DGS Docker image from the AutoDL community and ran the experimental part of this project on a cloud server with a 24GB RTX 4090 GPU, which helped me avoid most dependency-related problems.
+
 ### Data Preparation
 
 The data downloading and processing are the same with the original 3DGS. Please refer to [here](https://github.com/graphdeco-inria/gaussian-splatting?tab=readme-ov-file#running) for more details. If you want to run SteepGS on your own dataset, please refer to [here](https://github.com/graphdeco-inria/gaussian-splatting?tab=readme-ov-file#processing-your-own-scenes) for the instructions.
 
+Here is a brief description of the basic data processing pipeline:
+
+- Data Collection – Capture a video using a camera, then use FFmpeg to split it into individual frames (images) and save them in a specified directory structure.
+
+- Preprocessing – Run the convert.py script to process the data. This script uses COLMAP to estimate camera poses and generate an initial sparse point cloud.
+
+- Training – Execute train.py to train the 3D Gaussian Splatting (3DGS) model. I need `--eval` flag to split the dataset into training and testing sets, which is required for the evaluation of the model.
+
+- Rendering & Evaluation
+
+```shell
+python train.py -s <path to COLMAP or NeRF Synthetic dataset> -m <path to checkpoint> --no_gui --eval # Train with train/test split
+python render.py -m <path to trained model> # Generate renderings
+python metrics.py -m <path to trained model> # Compute error metrics on renderings
+```
+
+Anyway, the data for experiments in this project is the same as the original 3DGS, and other data sources like sensors are also welcome.
 
 ## Running
 
