@@ -47,8 +47,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     viewpoint_stack = None
     ema_loss_for_log = 0.0
+    total_train_time = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
+    prev_xyz = None
+    prev_cov = None
     for iteration in range(first_iter, opt.iterations + 1):        
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -91,6 +94,32 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         loss.backward()
 
         iter_end.record()
+        
+        # record total iteration time
+        torch.cuda.synchronize()
+        iter_time = iter_start.elapsed_time(iter_end)
+        total_train_time += iter_time
+        if tb_writer:
+            tb_writer.add_scalar('train/total_time', total_train_time, iteration)
+        # 记录高斯点数、位置变化率、协方差变化率
+        gauss_count = gaussians.get_xyz.shape[0] if hasattr(gaussians, 'get_xyz') else None
+        xyz_change = None
+        cov_change = None
+        cur_xyz = gaussians.get_xyz if hasattr(gaussians, 'get_xyz') else None
+        cur_cov = gaussians.get_covariance() if hasattr(gaussians, 'get_covariance') else None
+        if prev_xyz is not None and cur_xyz is not None:
+            xyz_change = torch.norm(cur_xyz - prev_xyz)
+        if prev_cov is not None and cur_cov is not None:
+            cov_change = torch.norm(cur_cov - prev_cov)
+        if tb_writer:
+            if gauss_count is not None:
+                tb_writer.add_scalar('gaussians/count', gauss_count, iteration)
+            if xyz_change is not None:
+                tb_writer.add_scalar('gaussians/xyz_change', xyz_change.item(), iteration)
+            if cov_change is not None:
+                tb_writer.add_scalar('gaussians/cov_change', cov_change.item(), iteration)
+        prev_xyz = cur_xyz.detach().clone() if cur_xyz is not None else None
+        prev_cov = cur_cov.detach().clone() if cur_cov is not None else None
 
         with torch.no_grad():
             # Progress bar
