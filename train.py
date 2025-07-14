@@ -95,40 +95,40 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         iter_end.record()
         
-        # record total iteration time
-        torch.cuda.synchronize()
-        iter_time = iter_start.elapsed_time(iter_end)
-        total_train_time += iter_time
-        if tb_writer:
-            tb_writer.add_scalar('train/total_time', total_train_time, iteration)
-        # 记录高斯点数、位置变化率、协方差变化率
-        gauss_count = gaussians.get_xyz.shape[0] if hasattr(gaussians, 'get_xyz') else None
-        xyz_change = None
-        cov_change = None
-        cur_xyz = gaussians.get_xyz if hasattr(gaussians, 'get_xyz') else None
-        cur_cov = gaussians.get_covariance() if hasattr(gaussians, 'get_covariance') else None
-        if prev_xyz is not None and cur_xyz is not None:
-            if prev_xyz.shape == cur_xyz.shape:
-                xyz_change = torch.norm(cur_xyz - prev_xyz)
-            else:
-                xyz_change = None  # 点数不一致时跳过
-        if prev_cov is not None and cur_cov is not None:
-            if prev_cov.shape == cur_cov.shape:
-                cov_change = torch.norm(cur_cov - prev_cov)
-            else:
-                cov_change = None
-        if tb_writer:
-            if gauss_count is not None:
-                tb_writer.add_scalar('gaussians/count', gauss_count, iteration)
-            if xyz_change is not None:
-                tb_writer.add_scalar('gaussians/xyz_change', xyz_change.item(), iteration)
-            if cov_change is not None:
-                tb_writer.add_scalar('gaussians/cov_change', cov_change.item(), iteration)
-        prev_xyz = cur_xyz.detach().clone() if cur_xyz is not None else None
-        prev_cov = cur_cov.detach().clone() if cur_cov is not None else None
-
         with torch.no_grad():
             # Progress bar
+            # record total iteration time
+            torch.cuda.synchronize()
+            iter_time = iter_start.elapsed_time(iter_end)
+            total_train_time += iter_time
+            if tb_writer:
+                tb_writer.add_scalar('train/total_time', total_train_time, iteration)
+            # 记录高斯点数、位置变化率、协方差变化率
+            gauss_count = gaussians.get_xyz.shape[0] if hasattr(gaussians, 'get_xyz') else None
+            xyz_change = None
+            cov_change = None
+            cur_xyz = gaussians.get_xyz if hasattr(gaussians, 'get_xyz') else None
+            cur_cov = gaussians.get_covariance() if hasattr(gaussians, 'get_covariance') else None
+            if prev_xyz is not None and cur_xyz is not None:
+                if prev_xyz.shape == cur_xyz.shape:
+                    xyz_change = torch.norm(cur_xyz - prev_xyz)
+                else:
+                    xyz_change = None  # 点数不一致时跳过
+            if prev_cov is not None and cur_cov is not None:
+                if prev_cov.shape == cur_cov.shape:
+                    cov_change = torch.norm(cur_cov - prev_cov)
+                else:
+                    cov_change = None
+            if tb_writer:
+                if gauss_count is not None:
+                    tb_writer.add_scalar('gaussians/count', gauss_count, iteration)
+                if xyz_change is not None:
+                    tb_writer.add_scalar('gaussians/xyz_change', xyz_change.item(), iteration)
+                if cov_change is not None:
+                    tb_writer.add_scalar('gaussians/cov_change', cov_change.item(), iteration)
+            prev_xyz = cur_xyz.detach().clone() if cur_xyz is not None else None
+            prev_cov = cur_cov.detach().clone() if cur_cov is not None else None
+
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % 10 == 0:
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
