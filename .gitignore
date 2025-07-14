@@ -8,4 +8,6 @@ tensorboard_3d
 screenshots
 
 *.zip
+test/
+datasets/
 
