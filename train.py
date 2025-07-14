@@ -108,9 +108,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         cur_xyz = gaussians.get_xyz if hasattr(gaussians, 'get_xyz') else None
         cur_cov = gaussians.get_covariance() if hasattr(gaussians, 'get_covariance') else None
         if prev_xyz is not None and cur_xyz is not None:
-            xyz_change = torch.norm(cur_xyz - prev_xyz)
+            if prev_xyz.shape == cur_xyz.shape:
+                xyz_change = torch.norm(cur_xyz - prev_xyz)
+            else:
+                xyz_change = None  # 点数不一致时跳过
         if prev_cov is not None and cur_cov is not None:
-            cov_change = torch.norm(cur_cov - prev_cov)
+            if prev_cov.shape == cur_cov.shape:
+                cov_change = torch.norm(cur_cov - prev_cov)
+            else:
+                cov_change = None
         if tb_writer:
             if gauss_count is not None:
                 tb_writer.add_scalar('gaussians/count', gauss_count, iteration)
