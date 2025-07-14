@@ -3,6 +3,10 @@ This is a course project designed for deep generative models, with the goal of r
 
 This repository is built based on the [official repository of 3DGS](https://github.com/graphdeco-inria/gaussian-splatting/).
 
+Some may argue that 3DGS is merely a 3D representation method rather than a generative model. Indeed, there is ongoing debate on this matter. In my implementation, I employ 3DGS as a model representation to accomplish 3D reconstruction tasks. The system takes a set of multi-view images as input and outputs a 3DGS representation, effectively functioning as a 3D generative model supervised by input images.
+
+The core training module of this system is a neural network model implemented in PyTorch, complete with forward computation and backpropagation. While it may not be considered a particularly deep model, it is substantially larger than traditional machine learning models. This scalability has only become feasible in recent years due to advancements in hardware. Thus, the project remains closely tied to the domain of deep generative models.
+
 ## Get Started
 ### Cloning the Repository
 first clone this repository, unlike the original 3DGS repository, the `diff-gaussian-rasterization` and `simple-knn` libraries are already in the repo, not as git submodules.
@@ -53,6 +57,8 @@ python metrics.py -m <path to trained model> # Compute error metrics on renderin
 ```
 
 Anyway, the data for experiments in this project is the same as the original 3DGS, and other data sources like sensors are also welcome.
+When reproduce the original 3DGS results, the foollowing datasets links are useful:
+[Mip-NeRF 360](https://jonbarron.info/mipnerf360/), [Tanks and Temples dataset](https://www.tanksandtemples.org/download/), [Deep Blending](http://visual.cs.ucl.ac.uk/pubs/deepblending/datasets.html)
 
 ## Running
 
