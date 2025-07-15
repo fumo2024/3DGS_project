@@ -32,6 +32,9 @@ except ImportError:
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
+    # 获取实验名（如有）
+    experiment_name = getattr(opt, 'experiment_name', None)
+    tb_prefix = f"{experiment_name}/" if experiment_name else ""
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
@@ -62,6 +65,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     warmup_sh_iter_trigger = getattr(opt, 'warmup_sh_iter_trigger', 1000)
     # 分辨率缩放因子
     warmup_scale = [0.25, 0.5, 1.0]
+    # 兜底机制：最大预热迭代数
+    warmup_max_iter_0 = getattr(opt, 'warmup_max_iter_0', 5000)  # stage 0最大迭代
+    warmup_max_iter_1 = getattr(opt, 'warmup_max_iter_1', 5000)  # stage 1最大迭代
     for iteration in range(first_iter, opt.iterations + 1):        
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -109,6 +115,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         viewpoint_cam.image_width = int(viewpoint_cam._orig_width * cur_scale)
         render_pkg = render(viewpoint_cam, gaussians, pipe, background)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+        # 渲染后恢复分辨率，避免影响后续
+        viewpoint_cam.image_height = viewpoint_cam._orig_height
+        viewpoint_cam.image_width = viewpoint_cam._orig_width
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
@@ -125,7 +134,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             iter_time = iter_start.elapsed_time(iter_end)
             total_train_time += iter_time
             if tb_writer:
-                tb_writer.add_scalar('train/total_time', total_train_time, iteration)
+                tb_writer.add_scalar(f'{tb_prefix}train/total_time', total_train_time, iteration)
             # 记录高斯点数、位置变化率、协方差变化率
             gauss_count = gaussians.get_xyz.shape[0] if hasattr(gaussians, 'get_xyz') else None
             xyz_change = None
@@ -136,8 +145,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if prev_xyz is not None and cur_xyz is not None:
                 if prev_xyz.shape == cur_xyz.shape:
                     xyz_change = torch.norm(cur_xyz - prev_xyz)
-                    # ΔG变化率（百分比）
-                    delta_g = torch.norm(cur_xyz - prev_xyz) / (torch.norm(prev_xyz) + 1e-8)
+                    # ΔG变化率（百分比），分母更鲁棒
+                    delta_g = torch.norm(cur_xyz - prev_xyz) / (torch.norm(prev_xyz) + torch.norm(cur_xyz) + 1e-8)
                 else:
                     xyz_change = None  # 点数不一致时跳过
             if prev_cov is not None and cur_cov is not None:
@@ -147,6 +156,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     cov_change = None
             # 低分辨率预热机制阶段切换逻辑
             if enable_warmup:
+                # stage 0: ΔG收敛或迭代数兜底
                 if warmup_stage == 0:
                     if delta_g is not None and delta_g < warmup_tau:
                         warmup_count += 1
@@ -155,25 +165,33 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     if warmup_count >= warmup_count_limit:
                         warmup_stage = 1  # 进入1/2分辨率
                         print(f"[Warmup] Geometry converged at iter {iteration}, switch to 1/2 resolution.")
+                    elif iteration - first_iter > warmup_max_iter_0:
+                        warmup_stage = 1
+                        print(f"[Warmup] Max iter reached at iter {iteration}, switch to 1/2 resolution.")
+                # stage 1: SH degree触发或迭代数兜底
                 elif warmup_stage == 1:
-                    # 检查SH参数是否开始优化2阶及以上
                     sh_degree = getattr(gaussians, 'sh_degree', 0)
                     if sh_degree >= warmup_sh_degree_trigger and iteration >= warmup_sh_iter_trigger:
                         warmup_stage = 2
                         print(f"[Warmup] SH optimization started at iter {iteration}, switch to full resolution.")
+                    elif iteration - first_iter > warmup_max_iter_1:
+                        warmup_stage = 2
+                        print(f"[Warmup] Max iter reached at iter {iteration}, switch to full resolution.")
             if tb_writer:
                 if gauss_count is not None:
-                    tb_writer.add_scalar('gaussians/count', gauss_count, iteration)
+                    tb_writer.add_scalar(f'{tb_prefix}gaussians/count', gauss_count, iteration)
                 if xyz_change is not None:
-                    tb_writer.add_scalar('gaussians/xyz_change', xyz_change.item(), iteration)
+                    tb_writer.add_scalar(f'{tb_prefix}gaussians/xyz_change', xyz_change.item(), iteration)
                 if cov_change is not None:
-                    tb_writer.add_scalar('gaussians/cov_change', cov_change.item(), iteration)
+                    tb_writer.add_scalar(f'{tb_prefix}gaussians/cov_change', cov_change.item(), iteration)
                 if delta_g is not None:
-                    tb_writer.add_scalar('gaussians/delta_g', float(delta_g.item()), iteration)
+                    tb_writer.add_scalar(f'{tb_prefix}gaussians/delta_g', float(delta_g.item()), iteration)
                 else:
-                    tb_writer.add_scalar('gaussians/delta_g', 0.0, iteration)
+                    tb_writer.add_scalar(f'{tb_prefix}gaussians/delta_g', 0.0, iteration)
                 if enable_warmup:
-                    tb_writer.add_scalar('warmup/stage', warmup_stage, iteration)
+                    tb_writer.add_scalar(f'{tb_prefix}warmup/stage', warmup_stage, iteration)
+                    tb_writer.add_scalar(f'{tb_prefix}warmup/count', warmup_count, iteration)
+                    tb_writer.add_scalar(f'{tb_prefix}warmup/tau', warmup_tau, iteration)
             prev_xyz = cur_xyz.detach().clone() if cur_xyz is not None else None
             prev_cov = cur_cov.detach().clone() if cur_cov is not None else None
 
@@ -226,23 +244,35 @@ def prepare_output_and_logger(args):
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
 
-    # Create Tensorboard writer
+    # TensorBoard 日志目录统一放在 output/tensorboard_logs/实验名 或 output/tensorboard_logs/模型名
     tb_writer = None
     if TENSORBOARD_FOUND:
-        tb_writer = SummaryWriter(args.model_path)
+        import time
+        if getattr(args, 'experiment_name', None):
+            tb_log_dir = os.path.join("output", "tensorboard_logs", args.experiment_name)
+        else:
+            tb_log_dir = os.path.join("output", "tensorboard_logs", os.path.basename(args.model_path))
+        os.makedirs(tb_log_dir, exist_ok=True)
+        tb_writer = SummaryWriter(tb_log_dir)
+        print(f"TensorBoard log dir: {tb_log_dir}")
     else:
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
 def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
     if tb_writer:
-        tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
-        tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
-        tb_writer.add_scalar('iter_time', elapsed, iteration)
+        # 支持实验分组
+        experiment_name = getattr(scene, 'experiment_name', None)
+        tb_prefix = f"{experiment_name}/" if experiment_name else ""
+        tb_writer.add_scalar(f'{tb_prefix}train_loss_patches/l1_loss', Ll1.item(), iteration)
+        tb_writer.add_scalar(f'{tb_prefix}train_loss_patches/total_loss', loss.item(), iteration)
+        tb_writer.add_scalar(f'{tb_prefix}iter_time', elapsed, iteration)
 
     # Report test and samples of training set
     if iteration in testing_iterations:
         torch.cuda.empty_cache()
+        experiment_name = getattr(scene, 'experiment_name', None)
+        tb_prefix = f"{experiment_name}/" if experiment_name else ""
         validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
                               {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
 
@@ -254,21 +284,21 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
                     if tb_writer and (idx < 5):
-                        tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
+                        tb_writer.add_images(f'{tb_prefix}{config["name"]}_view_{viewpoint.image_name}/render', image[None], global_step=iteration)
                         if iteration == testing_iterations[0]:
-                            tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
+                            tb_writer.add_images(f'{tb_prefix}{config["name"]}_view_{viewpoint.image_name}/ground_truth', gt_image[None], global_step=iteration)
                     l1_test += l1_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
                 psnr_test /= len(config['cameras'])
                 l1_test /= len(config['cameras'])          
-                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                print(f"\n[ITER {iteration}] Evaluating {config['name']}: L1 {l1_test} PSNR {psnr_test}")
                 if tb_writer:
-                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
-                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
+                    tb_writer.add_scalar(f'{tb_prefix}{config["name"]}/loss_viewpoint - l1_loss', l1_test, iteration)
+                    tb_writer.add_scalar(f'{tb_prefix}{config["name"]}/loss_viewpoint - psnr', psnr_test, iteration)
 
         if tb_writer:
-            tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
-            tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
+            tb_writer.add_histogram(f'{tb_prefix}scene/opacity_histogram', scene.gaussians.get_opacity, iteration)
+            tb_writer.add_scalar(f'{tb_prefix}total_points', scene.gaussians.get_xyz.shape[0], iteration)
         torch.cuda.empty_cache()
 
 if __name__ == "__main__":
@@ -288,6 +318,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument('--experiment_name', type=str, default=None, help='实验名称，用于TensorBoard分组')
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     # 低分辨率预热机制相关超参数
