@@ -55,6 +55,44 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_iter += 1
     prev_xyz = None
     prev_cov = None
+    # 信息增益视角选取相关变量
+    import numpy as np
+    residual_history = {}  # {viewpoint: [loss1, loss2, ...]}
+    trained_view_features = []  # [phi(v1), phi(v2), ...]
+    def get_view_feature(viewpoint):
+        # 位置、方向、焦距
+        pos = getattr(viewpoint, 'position', None)
+        dir = getattr(viewpoint, 'direction', None)
+        focal = np.array([getattr(viewpoint, 'focal_length', 1.0)])
+        if pos is None:
+            pos = np.array([0,0,0])
+        if dir is None:
+            dir = np.array([0,0,1])
+        return np.concatenate([np.array(pos).flatten(), np.array(dir).flatten(), focal])
+    def cosine_similarity(a, b):
+        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
+    def compute_g_res(viewpoint):
+        losses = residual_history.get(viewpoint, [])
+        if len(losses) < 1:
+            return 0.0
+        return float(np.mean(losses[-20:]))
+    def compute_g_nov(viewpoint):
+        phi_v = get_view_feature(viewpoint)
+        if not trained_view_features:
+            return 1.0
+        sims = [cosine_similarity(phi_v, phi_vp) for phi_vp in trained_view_features]
+        return 1.0 - max(sims)
+    def select_viewpoint(candidate_viewpoints, alpha=0.5):
+        g_res_list = [compute_g_res(v) for v in candidate_viewpoints]
+        g_nov_list = [compute_g_nov(v) for v in candidate_viewpoints]
+        # min-max归一化
+        g_res_min, g_res_max = min(g_res_list), max(g_res_list)
+        g_nov_min, g_nov_max = min(g_nov_list), max(g_nov_list)
+        g_res_norm = [(x - g_res_min) / (g_res_max - g_res_min + 1e-8) for x in g_res_list]
+        g_nov_norm = [(x - g_nov_min) / (g_nov_max - g_nov_min + 1e-8) for x in g_nov_list]
+        scores = [alpha * r + (1 - alpha) * n for r, n in zip(g_res_norm, g_nov_norm)]
+        best_idx = int(np.argmax(scores))
+        return candidate_viewpoints[best_idx]
     # 低分辨率预热机制相关变量
     enable_warmup = getattr(opt, 'enable_warmup', False)
     warmup_stage = 0  # 0: 1/4分辨率, 1: 1/2分辨率, 2: 全分辨率
@@ -68,6 +106,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # 兜底机制：最大预热迭代数
     warmup_max_iter_0 = getattr(opt, 'warmup_max_iter_0', 5000)  # stage 0最大迭代
     warmup_max_iter_1 = getattr(opt, 'warmup_max_iter_1', 5000)  # stage 1最大迭代
+    enable_info_gain = getattr(opt, 'enable_info_gain', False)
     for iteration in range(first_iter, opt.iterations + 1):        
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -92,10 +131,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
 
-        # Pick a random Camera
-        if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
-        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+        # 视角选取逻辑
+        if enable_info_gain:
+            # 信息增益视角选取
+            if not viewpoint_stack or len(viewpoint_stack) == 0:
+                viewpoint_stack = scene.getTrainCameras().copy()
+            candidate_viewpoints = viewpoint_stack
+            if len(candidate_viewpoints) > 10:
+                candidate_viewpoints = [candidate_viewpoints[i] for i in np.random.choice(len(candidate_viewpoints), min(10, len(candidate_viewpoints)), replace=False)]
+            viewpoint_cam = select_viewpoint(candidate_viewpoints, alpha=0.5)
+            if viewpoint_cam in viewpoint_stack:
+                viewpoint_stack.remove(viewpoint_cam)
+        else:
+            # 原有随机选取
+            if not viewpoint_stack:
+                viewpoint_stack = scene.getTrainCameras().copy()
+            viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
 
         # Render
         if (iteration - 1) == debug_from:
@@ -124,6 +175,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         loss.backward()
+        # 信息增益统计
+        # 残差增益历史
+        if viewpoint_cam not in residual_history:
+            residual_history[viewpoint_cam] = []
+        residual_history[viewpoint_cam].append(Ll1.item())
+        # 训练视角特征
+        trained_view_features.append(get_view_feature(viewpoint_cam))
 
         iter_end.record()
         
@@ -309,6 +367,7 @@ if __name__ == "__main__":
     pp = PipelineParams(parser)
     parser.add_argument('--no_gui', action='store_true', default=False)
     parser.add_argument('--enable_warmup', action='store_true', default=False, help='是否启用低分辨率预热机制')
+    parser.add_argument('--enable_info_gain', action='store_true', default=False, help='是否启用信息增益视角选取')
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
@@ -332,7 +391,12 @@ if __name__ == "__main__":
         if not hasattr(args, 'warmup_sh_iter_trigger'):
             args.warmup_sh_iter_trigger = 1000
         args.enable_warmup = True
-    
+    # 信息增益视角选取参数传递
+    if args.enable_info_gain:
+        setattr(args, 'enable_info_gain', True)
+    else:
+        setattr(args, 'enable_info_gain', False)
+
     print("Optimizing " + args.model_path)
 
     # Initialize system state (RNG)
