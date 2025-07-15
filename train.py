@@ -147,8 +147,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     cov_change = None
             # 低分辨率预热机制阶段切换逻辑
             if enable_warmup:
-                if warmup_stage == 0 and delta_g is not None:
-                    if delta_g < warmup_tau:
+                if warmup_stage == 0:
+                    if delta_g is not None and delta_g < warmup_tau:
                         warmup_count += 1
                     else:
                         warmup_count = 0
@@ -169,7 +169,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if cov_change is not None:
                     tb_writer.add_scalar('gaussians/cov_change', cov_change.item(), iteration)
                 if delta_g is not None:
-                    tb_writer.add_scalar('gaussians/delta_g', delta_g.item(), iteration)
+                    tb_writer.add_scalar('gaussians/delta_g', float(delta_g.item()), iteration)
+                else:
+                    tb_writer.add_scalar('gaussians/delta_g', 0.0, iteration)
                 if enable_warmup:
                     tb_writer.add_scalar('warmup/stage', warmup_stage, iteration)
             prev_xyz = cur_xyz.detach().clone() if cur_xyz is not None else None
