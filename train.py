@@ -40,6 +40,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
 
+    # define tb_prefix
+    experiment_name = getattr(scene, 'experiment_name', None)
+    tb_prefix = f"{experiment_name}/" if experiment_name else ""
+
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
