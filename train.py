@@ -93,6 +93,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         scores = [alpha * r + (1 - alpha) * n for r, n in zip(g_res_norm, g_nov_norm)]
         best_idx = int(np.argmax(scores))
         return candidate_viewpoints[best_idx]
+    def weighted_sample_viewpoint(candidate_viewpoints, alpha=0.5):
+        g_res_list = [compute_g_res(v) for v in candidate_viewpoints]
+        g_nov_list = [compute_g_nov(v) for v in candidate_viewpoints]
+        g_res_min, g_res_max = min(g_res_list), max(g_res_list)
+        g_nov_min, g_nov_max = min(g_nov_list), max(g_nov_list)
+        g_res_norm = [(x - g_res_min) / (g_res_max - g_res_min + 1e-8) for x in g_res_list]
+        g_nov_norm = [(x - g_nov_min) / (g_nov_max - g_nov_min + 1e-8) for x in g_nov_list]
+        scores = [alpha * r + (1 - alpha) * n for r, n in zip(g_res_norm, g_nov_norm)]
+        scores_np = np.array(scores)
+        probs = scores_np / (scores_np.sum() + 1e-8)
+        idx = np.random.choice(len(candidate_viewpoints), p=probs)
+        return candidate_viewpoints[idx]
     # 低分辨率预热机制相关变量
     enable_warmup = getattr(opt, 'enable_warmup', False)
     warmup_stage = 0  # 0: 1/4分辨率, 1: 1/2分辨率, 2: 全分辨率
@@ -107,6 +119,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     warmup_max_iter_0 = getattr(opt, 'warmup_max_iter_0', 5000)  # stage 0最大迭代
     warmup_max_iter_1 = getattr(opt, 'warmup_max_iter_1', 5000)  # stage 1最大迭代
     enable_info_gain = getattr(opt, 'enable_info_gain', False)
+    # 信息增益选取相关参数
+    info_gain_start_iter = getattr(opt, 'info_gain_start_iter', 4000)
+    info_gain_alternate_period = getattr(opt, 'info_gain_alternate_period', 2000)
     for iteration in range(first_iter, opt.iterations + 1):        
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -131,22 +146,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
 
-        # 视角选取逻辑
-        if enable_info_gain:
-            # 信息增益视角选取
-            if not viewpoint_stack or len(viewpoint_stack) == 0:
-                viewpoint_stack = scene.getTrainCameras().copy()
-            candidate_viewpoints = viewpoint_stack
-            if len(candidate_viewpoints) > 10:
-                candidate_viewpoints = [candidate_viewpoints[i] for i in np.random.choice(len(candidate_viewpoints), min(10, len(candidate_viewpoints)), replace=False)]
-            viewpoint_cam = select_viewpoint(candidate_viewpoints, alpha=0.5)
-            if viewpoint_cam in viewpoint_stack:
-                viewpoint_stack.remove(viewpoint_cam)
-        else:
-            # 原有随机选取
+        # 视角选取逻辑（前期均匀，后期交替）
+        if iteration < info_gain_start_iter:
+            # 均匀抽样（不重复）
             if not viewpoint_stack:
                 viewpoint_stack = scene.getTrainCameras().copy()
             viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+        else:
+            # 交替抽样
+            use_info_gain = ((iteration - info_gain_start_iter) // info_gain_alternate_period) % 2 == 1
+            if use_info_gain and enable_info_gain:
+                # 优先级抽样始终用全量训练视角集合，允许重复
+                candidate_viewpoints = scene.getTrainCameras()
+                if len(candidate_viewpoints) > 10:
+                    candidate_viewpoints = [candidate_viewpoints[i] for i in np.random.choice(len(candidate_viewpoints), min(10, len(candidate_viewpoints)), replace=False)]
+                viewpoint_cam = weighted_sample_viewpoint(candidate_viewpoints, alpha=0.5)
+            else:
+                if not viewpoint_stack:
+                    viewpoint_stack = scene.getTrainCameras().copy()
+                viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
 
         # Render
         if (iteration - 1) == debug_from:
