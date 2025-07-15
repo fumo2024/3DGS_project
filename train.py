@@ -52,6 +52,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_iter += 1
     prev_xyz = None
     prev_cov = None
+    # 低分辨率预热机制相关变量
+    enable_warmup = getattr(opt, 'enable_warmup', False)
+    warmup_stage = 0  # 0: 1/4分辨率, 1: 1/2分辨率, 2: 全分辨率
+    warmup_tau = getattr(opt, 'warmup_tau', 0.005)  # ΔG阈值，默认0.5%
+    warmup_count = 0  # 连续ΔG低于阈值计数
+    warmup_count_limit = getattr(opt, 'warmup_count_limit', 100)
+    warmup_sh_degree_trigger = getattr(opt, 'warmup_sh_degree_trigger', 2)
+    warmup_sh_iter_trigger = getattr(opt, 'warmup_sh_iter_trigger', 1000)
+    # 分辨率缩放因子
+    warmup_scale = [0.25, 0.5, 1.0]
     for iteration in range(first_iter, opt.iterations + 1):        
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -84,6 +94,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
+        # 低分辨率预热机制：动态调整图像分辨率
+        if enable_warmup:
+            cur_scale = warmup_scale[warmup_stage]
+        else:
+            cur_scale = 1.0
+        # 保存原始分辨率（只需一次）
+        if not hasattr(viewpoint_cam, '_orig_height'):
+            viewpoint_cam._orig_height = int(viewpoint_cam.image_height)
+        if not hasattr(viewpoint_cam, '_orig_width'):
+            viewpoint_cam._orig_width = int(viewpoint_cam.image_width)
+        # 动态调整分辨率
+        viewpoint_cam.image_height = int(viewpoint_cam._orig_height * cur_scale)
+        viewpoint_cam.image_width = int(viewpoint_cam._orig_width * cur_scale)
         render_pkg = render(viewpoint_cam, gaussians, pipe, background)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
@@ -109,9 +132,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             cov_change = None
             cur_xyz = gaussians.get_xyz if hasattr(gaussians, 'get_xyz') else None
             cur_cov = gaussians.get_covariance() if hasattr(gaussians, 'get_covariance') else None
+            delta_g = None
             if prev_xyz is not None and cur_xyz is not None:
                 if prev_xyz.shape == cur_xyz.shape:
                     xyz_change = torch.norm(cur_xyz - prev_xyz)
+                    # ΔG变化率（百分比）
+                    delta_g = torch.norm(cur_xyz - prev_xyz) / (torch.norm(prev_xyz) + 1e-8)
                 else:
                     xyz_change = None  # 点数不一致时跳过
             if prev_cov is not None and cur_cov is not None:
@@ -119,6 +145,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     cov_change = torch.norm(cur_cov - prev_cov)
                 else:
                     cov_change = None
+            # 低分辨率预热机制阶段切换逻辑
+            if enable_warmup:
+                if warmup_stage == 0 and delta_g is not None:
+                    if delta_g < warmup_tau:
+                        warmup_count += 1
+                    else:
+                        warmup_count = 0
+                    if warmup_count >= warmup_count_limit:
+                        warmup_stage = 1  # 进入1/2分辨率
+                        print(f"[Warmup] Geometry converged at iter {iteration}, switch to 1/2 resolution.")
+                elif warmup_stage == 1:
+                    # 检查SH参数是否开始优化2阶及以上
+                    sh_degree = getattr(gaussians, 'sh_degree', 0)
+                    if sh_degree >= warmup_sh_degree_trigger and iteration >= warmup_sh_iter_trigger:
+                        warmup_stage = 2
+                        print(f"[Warmup] SH optimization started at iter {iteration}, switch to full resolution.")
             if tb_writer:
                 if gauss_count is not None:
                     tb_writer.add_scalar('gaussians/count', gauss_count, iteration)
@@ -126,6 +168,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     tb_writer.add_scalar('gaussians/xyz_change', xyz_change.item(), iteration)
                 if cov_change is not None:
                     tb_writer.add_scalar('gaussians/cov_change', cov_change.item(), iteration)
+                if delta_g is not None:
+                    tb_writer.add_scalar('gaussians/delta_g', delta_g.item(), iteration)
+                if enable_warmup:
+                    tb_writer.add_scalar('warmup/stage', warmup_stage, iteration)
             prev_xyz = cur_xyz.detach().clone() if cur_xyz is not None else None
             prev_cov = cur_cov.detach().clone() if cur_cov is not None else None
 
@@ -230,6 +276,7 @@ if __name__ == "__main__":
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
     parser.add_argument('--no_gui', action='store_true', default=False)
+    parser.add_argument('--enable_warmup', action='store_true', default=False, help='是否启用低分辨率预热机制')
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
@@ -241,6 +288,17 @@ if __name__ == "__main__":
     parser.add_argument("--start_checkpoint", type=str, default = None)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
+    # 低分辨率预热机制相关超参数
+    if args.enable_warmup:
+        if not hasattr(args, 'warmup_tau'):
+            args.warmup_tau = 0.005  # ΔG阈值，默认0.5%
+        if not hasattr(args, 'warmup_count_limit'):
+            args.warmup_count_limit = 100
+        if not hasattr(args, 'warmup_sh_degree_trigger'):
+            args.warmup_sh_degree_trigger = 2
+        if not hasattr(args, 'warmup_sh_iter_trigger'):
+            args.warmup_sh_iter_trigger = 1000
+        args.enable_warmup = True
     
     print("Optimizing " + args.model_path)
 
