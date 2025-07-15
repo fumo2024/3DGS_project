@@ -10,4 +10,5 @@ screenshots
 *.zip
 test/
 datasets/
-
+images/
+logs/
