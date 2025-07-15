@@ -32,9 +32,7 @@ except ImportError:
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
-    # 获取实验名（如有）
-    experiment_name = getattr(opt, 'experiment_name', None)
-    tb_prefix = f"{experiment_name}/" if experiment_name else ""
+    # Get experiment name (if any)
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
@@ -55,12 +53,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_iter += 1
     prev_xyz = None
     prev_cov = None
-    # 信息增益视角选取相关变量
+    # Information gain viewpoint selection related variables
     import numpy as np
     residual_history = {}  # {viewpoint: [loss1, loss2, ...]}
     trained_view_features = []  # [phi(v1), phi(v2), ...]
     def get_view_feature(viewpoint):
-        # 位置、方向、焦距
+        # position, direction, focal length
         pos = getattr(viewpoint, 'position', None)
         dir = getattr(viewpoint, 'direction', None)
         focal = np.array([getattr(viewpoint, 'focal_length', 1.0)])
@@ -72,20 +70,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     def cosine_similarity(a, b):
         return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
     def compute_g_res(viewpoint):
+        # Residual gain history
         losses = residual_history.get(viewpoint, [])
         if len(losses) < 1:
             return 0.0
         return float(np.mean(losses[-20:]))
     def compute_g_nov(viewpoint):
+        # Training viewpoint features
         phi_v = get_view_feature(viewpoint)
         if not trained_view_features:
             return 1.0
         sims = [cosine_similarity(phi_v, phi_vp) for phi_vp in trained_view_features]
         return 1.0 - max(sims)
     def select_viewpoint(candidate_viewpoints, alpha=0.5):
+        # min-max normalization
         g_res_list = [compute_g_res(v) for v in candidate_viewpoints]
         g_nov_list = [compute_g_nov(v) for v in candidate_viewpoints]
-        # min-max归一化
         g_res_min, g_res_max = min(g_res_list), max(g_res_list)
         g_nov_min, g_nov_max = min(g_nov_list), max(g_nov_list)
         g_res_norm = [(x - g_res_min) / (g_res_max - g_res_min + 1e-8) for x in g_res_list]
@@ -94,6 +94,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         best_idx = int(np.argmax(scores))
         return candidate_viewpoints[best_idx]
     def weighted_sample_viewpoint(candidate_viewpoints, alpha=0.5):
+        # min-max normalization
         g_res_list = [compute_g_res(v) for v in candidate_viewpoints]
         g_nov_list = [compute_g_nov(v) for v in candidate_viewpoints]
         g_res_min, g_res_max = min(g_res_list), max(g_res_list)
@@ -105,23 +106,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         probs = scores_np / (scores_np.sum() + 1e-8)
         idx = np.random.choice(len(candidate_viewpoints), p=probs)
         return candidate_viewpoints[idx]
-    # 低分辨率预热机制相关变量
+    # Low-resolution warmup mechanism related variables
     enable_warmup = getattr(opt, 'enable_warmup', False)
-    warmup_stage = 0  # 0: 1/4分辨率, 1: 1/2分辨率, 2: 全分辨率
-    warmup_tau = getattr(opt, 'warmup_tau', 0.005)  # ΔG阈值，默认0.5%
-    warmup_count = 0  # 连续ΔG低于阈值计数
+    warmup_stage = 0  # 0: 1/4 resolution, 1: 1/2 resolution, 2: full resolution
+    warmup_tau = getattr(opt, 'warmup_tau', 0.005)  # ΔG threshold, default 0.5%
+    warmup_count = 0  # consecutive ΔG below threshold count
     warmup_count_limit = getattr(opt, 'warmup_count_limit', 100)
     warmup_sh_degree_trigger = getattr(opt, 'warmup_sh_degree_trigger', 2)
     warmup_sh_iter_trigger = getattr(opt, 'warmup_sh_iter_trigger', 1000)
-    # 分辨率缩放因子
+    # Resolution scaling factors
     warmup_scale = [0.25, 0.5, 1.0]
-    # 兜底机制：最大预热迭代数
-    warmup_max_iter_0 = getattr(opt, 'warmup_max_iter_0', 5000)  # stage 0最大迭代
-    warmup_max_iter_1 = getattr(opt, 'warmup_max_iter_1', 5000)  # stage 1最大迭代
+    # Fallback mechanism: maximum warmup iterations
+    warmup_max_iter_0 = getattr(opt, 'warmup_max_iter_0', 5000)  # stage 0 max iterations
+    warmup_max_iter_1 = getattr(opt, 'warmup_max_iter_1', 5000)  # stage 1 max iterations
     enable_info_gain = getattr(opt, 'enable_info_gain', False)
-    # 信息增益选取相关参数
-    info_gain_start_iter = getattr(opt, 'info_gain_start_iter', 4000)
-    info_gain_alternate_period = getattr(opt, 'info_gain_alternate_period', 2000)
+    # Information gain selection related parameters
+    info_gain_start_iter = getattr(opt, 'info_gain_start_iter', 2000)
+    info_gain_alternate_period = getattr(opt, 'info_gain_alternate_period', 1000)
     for iteration in range(first_iter, opt.iterations + 1):        
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -142,21 +143,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         gaussians.update_learning_rate(iteration)
 
-        # Every 1000 its we increase the levels of SH up to a maximum degree
+        # Every 1000 iterations we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
 
-        # 视角选取逻辑（前期均匀，后期交替）
+        # Viewpoint selection logic (uniform in early stage, alternate in later stage)
         if iteration < info_gain_start_iter:
-            # 均匀抽样（不重复）
+            # Uniform sampling (no repetition)
             if not viewpoint_stack:
                 viewpoint_stack = scene.getTrainCameras().copy()
             viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
         else:
-            # 交替抽样
+            # Alternate sampling
             use_info_gain = ((iteration - info_gain_start_iter) // info_gain_alternate_period) % 2 == 1
             if use_info_gain and enable_info_gain:
-                # 优先级抽样始终用全量训练视角集合，允许重复
+                # Priority sampling always uses the full set of training viewpoints, allowing repetition
                 candidate_viewpoints = scene.getTrainCameras()
                 if len(candidate_viewpoints) > 10:
                     candidate_viewpoints = [candidate_viewpoints[i] for i in np.random.choice(len(candidate_viewpoints), min(10, len(candidate_viewpoints)), replace=False)]
@@ -169,22 +170,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
-        # 低分辨率预热机制：动态调整图像分辨率
+        # Low-resolution warmup mechanism: dynamically adjust image resolution
         if enable_warmup:
             cur_scale = warmup_scale[warmup_stage]
         else:
             cur_scale = 1.0
-        # 保存原始分辨率（只需一次）
+        # Save original resolution (only once)
         if not hasattr(viewpoint_cam, '_orig_height'):
             viewpoint_cam._orig_height = int(viewpoint_cam.image_height)
         if not hasattr(viewpoint_cam, '_orig_width'):
             viewpoint_cam._orig_width = int(viewpoint_cam.image_width)
-        # 动态调整分辨率
+        # Dynamically adjust resolution
         viewpoint_cam.image_height = int(viewpoint_cam._orig_height * cur_scale)
         viewpoint_cam.image_width = int(viewpoint_cam._orig_width * cur_scale)
         render_pkg = render(viewpoint_cam, gaussians, pipe, background)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-        # 渲染后恢复分辨率，避免影响后续
+        # Restore resolution after rendering to avoid affecting subsequent steps
         viewpoint_cam.image_height = viewpoint_cam._orig_height
         viewpoint_cam.image_width = viewpoint_cam._orig_width
 
@@ -193,25 +194,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         loss.backward()
-        # 信息增益统计
-        # 残差增益历史
+        # Information gain statistics
+        # Residual gain history
         if viewpoint_cam not in residual_history:
             residual_history[viewpoint_cam] = []
         residual_history[viewpoint_cam].append(Ll1.item())
-        # 训练视角特征
+        # Training viewpoint features
         trained_view_features.append(get_view_feature(viewpoint_cam))
 
         iter_end.record()
         
         with torch.no_grad():
             # Progress bar
-            # record total iteration time
+            # Record total iteration time
             torch.cuda.synchronize()
             iter_time = iter_start.elapsed_time(iter_end)
             total_train_time += iter_time
             if tb_writer:
                 tb_writer.add_scalar(f'{tb_prefix}train/total_time', total_train_time, iteration)
-            # 记录高斯点数、位置变化率、协方差变化率
+            # Log number of Gaussians, position change rate, covariance change rate
             gauss_count = gaussians.get_xyz.shape[0] if hasattr(gaussians, 'get_xyz') else None
             xyz_change = None
             cov_change = None
@@ -221,30 +222,30 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if prev_xyz is not None and cur_xyz is not None:
                 if prev_xyz.shape == cur_xyz.shape:
                     xyz_change = torch.norm(cur_xyz - prev_xyz)
-                    # ΔG变化率（百分比），分母更鲁棒
+                    # ΔG change rate (percentage), more robust denominator
                     delta_g = torch.norm(cur_xyz - prev_xyz) / (torch.norm(prev_xyz) + torch.norm(cur_xyz) + 1e-8)
                 else:
-                    xyz_change = None  # 点数不一致时跳过
+                    xyz_change = None  # Skip if number of points is inconsistent
             if prev_cov is not None and cur_cov is not None:
                 if prev_cov.shape == cur_cov.shape:
                     cov_change = torch.norm(cur_cov - prev_cov)
                 else:
                     cov_change = None
-            # 低分辨率预热机制阶段切换逻辑
+            # Low-resolution warmup stage switching logic
             if enable_warmup:
-                # stage 0: ΔG收敛或迭代数兜底
+                # stage 0: ΔG convergence or max iteration fallback
                 if warmup_stage == 0:
                     if delta_g is not None and delta_g < warmup_tau:
                         warmup_count += 1
                     else:
                         warmup_count = 0
                     if warmup_count >= warmup_count_limit:
-                        warmup_stage = 1  # 进入1/2分辨率
+                        warmup_stage = 1  # Switch to 1/2 resolution
                         print(f"[Warmup] Geometry converged at iter {iteration}, switch to 1/2 resolution.")
                     elif iteration - first_iter > warmup_max_iter_0:
                         warmup_stage = 1
                         print(f"[Warmup] Max iter reached at iter {iteration}, switch to 1/2 resolution.")
-                # stage 1: SH degree触发或迭代数兜底
+                # stage 1: SH degree trigger or max iteration fallback
                 elif warmup_stage == 1:
                     sh_degree = getattr(gaussians, 'sh_degree', 0)
                     if sh_degree >= warmup_sh_degree_trigger and iteration >= warmup_sh_iter_trigger:
@@ -281,7 +282,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Log and save
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
             if (iteration in saving_iterations):
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
+                print(f"\n[ITER {iteration}] Saving Gaussians")
                 scene.save(iteration)
 
             # Densification
@@ -303,7 +304,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.optimizer.zero_grad(set_to_none = True)
 
             if (iteration in checkpoint_iterations):
-                print("\n[ITER {}] Saving Checkpoint".format(iteration))
+                print(f"\n[ITER {iteration}] Saving Checkpoint")
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
 def prepare_output_and_logger(args):    
